@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Trackmaker - Piano MIDI Visualizer</title>
     <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/ort.min.js"></script>
     <style>
@@ -11,51 +11,51 @@
         body {
             margin: 0; padding: 0; overflow: hidden; background: #000;
             font-family: 'Press Start 2P', monospace; color: #0f0;
+            touch-action: none;
         }
         #container { position: relative; width: 100vw; height: 100vh; }
         #video, #canvas {
             position: absolute; top: 0; left: 0; width: 100%; height: 100%;
-            object-fit: cover;
+            object-fit: cover; transform: scaleX(-1); /* Mirror selfie */
         }
         #video { display: none; }
         .controls {
             position: absolute; top: 20px; left: 50%; transform: translateX(-50%);
-            z-index: 100; display: flex; gap: 12px; flex-wrap: wrap; justify-content: center;
-            background: rgba(0,0,0,0.75); padding: 15px 25px; border-radius: 8px;
-            border: 2px solid #0f0; box-shadow: 0 0 20px rgba(0,255,0,0.5);
+            z-index: 100; display: flex; gap: 10px; flex-wrap: wrap; justify-content: center;
+            background: rgba(0,0,0,0.85); padding: 12px 20px; border-radius: 8px;
+            border: 2px solid #0f0; box-shadow: 0 0 20px rgba(0,255,0,0.6);
         }
         button {
             background: #111; color: #0f0; border: 2px solid #0f0;
-            padding: 12px 24px; font-family: 'Press Start 2P', monospace;
-            font-size: 14px; cursor: pointer; text-transform: uppercase;
+            padding: 12px 20px; font-family: 'Press Start 2P', monospace;
+            font-size: 13px; cursor: pointer; text-transform: uppercase;
             letter-spacing: 1px; transition: all 0.2s;
         }
         button:hover { background: #0f0; color: #000; box-shadow: 0 0 15px #0f0; }
         button:disabled { opacity: 0.5; cursor: not-allowed; }
         #status {
             position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%);
-            background: rgba(0,0,0,0.8); padding: 10px 20px; border: 2px solid #0f0;
-            font-size: 13px; z-index: 100; white-space: nowrap;
+            background: rgba(0,0,0,0.85); padding: 10px 20px; border: 2px solid #0f0;
+            font-size: 13px; z-index: 100; white-space: nowrap; text-align: center;
         }
     </style>
 </head>
 <body>
     <div id="container">
-        <video id="video" autoplay playsinline></video>
+        <video id="video" autoplay playsinline muted></video>
         <canvas id="canvas"></canvas>
         
         <div class="controls">
-            <button id="btnStartVideo">START CAMERA</button>
+            <button id="btnStartVideo">START SELFIE CAMERA</button>
             <button id="btnHomography" disabled>CALCULATE HOMOGRAPHY</button>
             <button id="btnSelectMidi" disabled>SELECT MIDI</button>
-            <button id="btnStartVis" disabled>START VISUALIZATION</button>
+            <button id="btnStartVis" disabled>START VIS</button>
         </div>
         
-        <div id="status">READY — PRESS START CAMERA</div>
+        <div id="status">READY — PRESS START SELFIE CAMERA</div>
     </div>
 
     <script>
-        // === CORE SETUP ===
         let session = null;
         let video = document.getElementById('video');
         let canvas = document.getElementById('canvas');
@@ -70,7 +70,7 @@
         let started = false;
         let animationFrame = null;
         
-        const TARGET_SIZE = 1600;
+        const TARGET_SIZE = 1280; // Reduced for iPhone performance
         const CONF_THRESHOLD = 0.25;
         
         const btnStartVideo = document.getElementById('btnStartVideo');
@@ -79,7 +79,6 @@
         const btnStartVis = document.getElementById('btnStartVis');
         const statusEl = document.getElementById('status');
 
-        // ================== CLASSES (faithful to Python) ==================
         class KeypointManager {
             constructor() {
                 this.scale_dict = {2:1.079,3:2.159,4:3.238,5:4.318,6:5.397,7:6.476};
@@ -143,186 +142,9 @@
             }
             
             transformFrame(videoEl) {
-                // Improved fluid transform using detected bounds + resize
-                const temp = document.createElement('canvas');
-                temp.width = videoEl.videoWidth; temp.height = videoEl.videoHeight;
-                temp.getContext('2d').drawImage(videoEl,0,0);
-                
-                if (!this.keys.length) return temp;
-                
-                const xs = this.keys.flatMap(k => [k[0][0],k[1][0]]);
-                const minX = Math.max(0, Math.min(...xs));
-                const maxX = Math.min(temp.width, Math.max(...xs));
-                
-                const cropped = document.createElement('canvas');
-                cropped.width = maxX-minX; cropped.height = temp.height;
-                cropped.getContext('2d').drawImage(temp, minX, 0, cropped.width, cropped.height, 0,0,cropped.width,cropped.height);
-                
-                // Final height scaling + 180° rotation
-                const finalH = Math.round(cropped.width / this.scale_factor);
-                const finalC = document.createElement('canvas');
-                finalC.width = cropped.width; finalC.height = finalH;
-                const fctx = finalC.getContext('2d');
-                fctx.translate(cropped.width/2, finalH/2);
-                fctx.rotate(Math.PI);
-                fctx.drawImage(cropped, -cropped.width/2, -cropped.height/2);
-                
-                this.scaled_width = finalC.width;
-                this.scaled_height = finalC.height;
-                return finalC;
-            }
-        }
-        
-        class KeyManager { constructor(name,x,w,sig=null){this.name=name;this.x=x;this.w=w;this.signature=sig;} set_signature(s){this.signature=s;} }
-        
-        class PianoManager {
-            constructor(km) { this.keypointManager = km; this.wkeys=[]; this.bkeys=[]; this.all_keys=[]; }
-            init() {
-                const num = {2:7,3:14,4:21,5:28,6:35,7:42}[this.keypointManager.keys.length] || 0;
-                const kw = this.keypointManager.scaled_width / num;
-                let x=0;
-                const wd = {0:"A",1:"B",2:"C",3:"D",4:"E",5:"F",6:"G"};
-                for (let i=0;i<num;i++) {
-                    this.wkeys.push(new KeyManager(wd[i%7], x, kw));
-                    x += kw;
-                }
-                // MIDI assignment (simplified but faithful)
-                this.wkeys.forEach((k,i) => k.set_signature(60 + (i%12)));
-                this.all_keys = [...this.wkeys];
-            }
-        }
-        
-        class NoteManager {
-            constructor(sig, start, end, avgSpeed=120) {
-                this.signature = sig; this.start=start; this.end=end; this.avg_speed=avgSpeed; this.length=0;
-            }
-            getPosition(now, startTime) {
-                const t = (now - startTime) - this.start;
-                this.length = this.avg_speed * (this.end - this.start);
-                return t * this.avg_speed;
-            }
-        }
-        
-        class MidiManager {
-            constructor(pm) { this.pianoManager = pm; this.notes=[]; this.start_time=null; }
-            
-            async loadMidi() {
-                return new Promise(res => {
-                    const inp = document.createElement('input');
-                    inp.type='file'; inp.accept='.mid,.midi';
-                    inp.onchange = async e => {
-                        const f = e.target.files[0];
-                        if (!f) return res(false);
-                        // For full MIDI parsing you'd add midi-parser-js, but for single file we simulate nice falling notes
-                        this.notes = [];
-                        for (let i=0; i<30; i++) {
-                            this.notes.push(new NoteManager(60 + Math.floor(Math.random()*30), i*0.3, i*0.3 + 0.6));
-                        }
-                        res(true);
-                    };
-                    inp.click();
-                });
-            }
-            
-            draw(visCanvas) {
-                if (!this.start_time) return visCanvas;
-                const now = Date.now()/1000;
-                const c = document.createElement('canvas');
-                c.width = visCanvas.width; c.height = visCanvas.height + 180;
-                const ct = c.getContext('2d');
-                ct.drawImage(visCanvas,0,0);
-                
-                ct.fillStyle = '#111'; ct.fillRect(0, visCanvas.height, c.width, 180);
-                
-                for (let note of this.notes) {
-                    const key = this.pianoManager.all_keys.find(k => k.signature === note.signature);
-                    if (!key) continue;
-                    const y = note.getPosition(now, this.start_time/1000);
-                    if (y > visCanvas.height + 100 || y < -200) continue;
-                    
-                    const x1 = key.x, x2 = x1 + key.w;
-                    // Fluid glowing rectangles
-                    ct.fillStyle = 'rgba(255,70,70,0.95)';
-                    ct.fillRect(x1, Math.max(0,y-note.length), x2-x1, note.length);
-                    ct.strokeStyle = '#fff'; ct.lineWidth = 3;
-                    ct.strokeRect(x1+3, Math.max(0,y-note.length)+3, x2-x1-6, note.length-6);
-                }
-                return c;
-            }
-        }
-        
-        async function loadModel() {
-            statusEl.textContent = "LOADING YOLO...";
-            session = await ort.InferenceSession.create(
-                "https://williamhe7.github.io/trackmaker/best_v3.onnx",
-                {executionProviders:['wasm']}
-            );
-            statusEl.textContent = "MODEL READY";
-        }
-        
-        async function startCamera() {
-            stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:"environment", width:1280, height:720}});
-            video.srcObject = stream;
-            await video.play();
-            canvas.width = video.videoWidth || 1280;
-            canvas.height = video.videoHeight || 720;
-            btnStartVideo.disabled = true;
-            btnHomography.disabled = false;
-            isRunning = true;
-            statusEl.textContent = "CAMERA ON — POINT AT PIANO KEYS";
-            loop();
-        }
-        
-        async function calculateHomography() {
-            statusEl.textContent = "DETECTING KEYS...";
-            if (!keypointManager) keypointManager = new KeypointManager();
-            const ok = await keypointManager.detectKeys(video);
-            if (ok) {
-                pianoManager = new PianoManager(keypointManager);
-                pianoManager.init();
-                btnSelectMidi.disabled = false;
-                statusEl.textContent = `${keypointManager.keys.length} KEYS DETECTED`;
-            } else statusEl.textContent = "NO KEYS FOUND — RETRY";
-        }
-        
-        function loop() {
-            if (!isRunning) return;
-            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-            
-            if (keypointManager && started) {
-                const transformed = keypointManager.transformFrame(video);
-                ctx.clearRect(0,0,canvas.width,canvas.height);
-                ctx.drawImage(transformed, 0, 0, keypointManager.scaled_width, keypointManager.scaled_height);
-                
-                if (midiManager && midiManager.start_time) {
-                    const finalVis = midiManager.draw(transformed);
-                    ctx.drawImage(finalVis, 0, 0);
-                }
-            }
-            animationFrame = requestAnimationFrame(loop);
-        }
-        
-        // Button wiring
-        btnStartVideo.onclick = startCamera;
-        btnHomography.onclick = calculateHomography;
-        btnSelectMidi.onclick = async () => {
-            if (!midiManager) midiManager = new MidiManager(pianoManager);
-            if (await midiManager.loadMidi()) {
-                btnStartVis.disabled = false;
-                statusEl.textContent = "MIDI LOADED";
-            }
-        };
-        btnStartVis.onclick = () => {
-            started = true;
-            midiManager.start_time = Date.now();
-            btnStartVis.disabled = true;
-            statusEl.textContent = "VISUALIZATION RUNNING";
-        };
-        
-        window.addEventListener('beforeunload', () => {
-            if (stream) stream.getTracks().forEach(t=>t.stop());
-            if (animationFrame) cancelAnimationFrame(animationFrame);
-        });
-    </script>
-</body>
-</html>
+                if (!this.keys.length) {
+                    const temp = document.createElement('canvas');
+                    temp.width = videoEl.videoWidth; temp.height = videoEl.videoHeight;
+                    temp.getContext('2d').drawImage(videoEl,0,0);
+                    return temp;
+               
